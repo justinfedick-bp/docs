@@ -6,6 +6,7 @@ Community-driven documentation for the Partner Engine codebase.
 
 - [How does the batch module work?](#how-does-the-batch-module-work)
 - [Why is batch context needed? What problems does it solve?](#why-is-batch-context-needed-what-problems-does-it-solve)
+- [Do we use Redis anywhere other than locks in the codebase?](#do-we-use-redis-anywhere-other-than-locks-in-the-codebase)
 
 ---
 
@@ -309,6 +310,113 @@ end
 ```
 
 The entire pattern exists to centralize control, prevent race conditions, optimize database writes, and make the complex rules engine execution predictable and testable.
+
+---
+
+## Do we use Redis anywhere other than locks in the codebase?
+
+Yes, Redis is critical infrastructure used for at least **10 different purposes** beyond locking. Here's a comprehensive breakdown:
+
+### 1. Distributed Locking (Multiple Types)
+
+**Simple Locks** - `app/lib/redis_lock.rb:3`
+- Used by Batch Context for application form updates
+- 60-second lock duration with optional blocking wait
+- Prevents concurrent modifications to the same form
+
+**Redlock Manager** - `app/lib/redlock_manager.rb:6`
+- More robust distributed locking using the Redlock algorithm
+- Used by `JobMutex` (`lib/job_mutex.rb:6`) to prevent duplicate job execution
+- Example: `SendGuestCompletionV2Job` uses it to ensure the job runs only once per form
+
+### 2. ActionCable / WebSocket Support
+
+**Subscriber Tracking** - `app/lib/application_form_broadcaster.rb:8`
+- Tracks which users are subscribed to each application form's WebSocket channel
+- Uses Redis hash to count sessions per user
+- 2-day expiry on subscription data
+- Enables targeted broadcasting to only active viewers
+
+**ActionCable Adapter** - `config/environments/production.rb:99`
+- ActionCable itself uses Redis as its pub/sub backend for WebSocket message distribution
+
+### 3. Active Session Tracking
+
+**ActiveUsers Service** - `app/services/active_users.rb:4`
+
+Tracks currently logged-in users and their session counts:
+- Maintains counters per tenant for agents and consumers
+- Caches user ID → access token mapping for fast lookups
+- Powers metrics and dashboards showing active user counts
+- Automatically cleaned up when tokens expire
+
+### 4. OAuth Token Caching
+
+**Progressive Authentication** - `app/services/progressive/authentication.rb:49`
+
+Caches OAuth2 access tokens to avoid re-authentication:
+- Stores Progressive Insurance API tokens
+- Expires 60 seconds before token expiry (race condition prevention)
+- Significantly reduces auth API calls
+
+### 5. Business Discovery Tree Data
+
+**NAICS Lookup** - `app/lib/business_discovery_tree.rb:77`
+
+Stores NAICS (business classification) lookup data:
+- Hash structure keyed by ZIP code and employee size
+- Used for business class recommendation during application flow
+- Loaded from seed data into Redis for fast lookups
+
+### 6. Background Job Queue Management
+
+**Tenant Export** - `app/lib/tenant_export/store.rb:4`
+
+For tenant export functionality:
+- **Job Queue**: Redis lists for work queue (LPUSH/RPOP pattern)
+- **Deduplication**: Redis sets track processed event UUIDs to prevent duplicates
+- 1-day TTL on receipt tracking
+
+### 7. Sidekiq Job Queue
+
+**Sidekiq Configuration** - `config/initializers/sidekiq.rb:7`
+
+Sidekiq uses Redis as its primary datastore for:
+- Job queue storage
+- Job metadata
+- Retry logic
+- Scheduled/delayed jobs
+- Cron job schedules
+
+### 8. Rails Cache Store
+
+**Production Cache** - `config/environments/production.rb:51`
+
+```ruby
+config.cache_store = :redis_cache_store, { url: REDIS_URL }
+```
+
+Redis serves as the Rails cache backend for:
+- Fragment caching
+- Low-level caching (`Rails.cache.fetch`)
+- HTTP caching
+
+### Summary
+
+| Use Case | Files | Purpose |
+|----------|-------|---------|
+| Batch Context Locks | `batch.rb`, `redis_lock.rb` | Prevent concurrent form updates |
+| Job Locks | `redlock_manager.rb`, `job_mutex.rb` | Prevent duplicate job execution |
+| WebSocket Subscribers | `application_form_broadcaster.rb` | Track active form viewers |
+| ActionCable Adapter | Config files | Pub/sub for WebSocket messages |
+| Active Users | `active_users.rb` | Session tracking & metrics |
+| OAuth Tokens | `progressive/authentication.rb` | Cache carrier API tokens |
+| NAICS Lookup | `business_discovery_tree.rb` | Fast business classification |
+| Export Jobs | `tenant_export/store.rb` | Queue & deduplication |
+| Sidekiq | `initializers/sidekiq.rb` | Background job queue |
+| Rails Cache | `production.rb` | General-purpose caching |
+
+Redis is essential infrastructure that powers real-time features (WebSockets), prevents race conditions (locks), optimizes performance (caching), and manages background jobs (Sidekiq).
 
 ---
 

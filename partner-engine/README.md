@@ -7,6 +7,7 @@ Community-driven documentation for the Partner Engine codebase.
 - [How does the batch module work?](#how-does-the-batch-module-work)
 - [Why is batch context needed? What problems does it solve?](#why-is-batch-context-needed-what-problems-does-it-solve)
 - [Do we use Redis anywhere other than locks in the codebase?](#do-we-use-redis-anywhere-other-than-locks-in-the-codebase)
+- [What does the tenant_code do in an application form?](#what-does-the-tenant_code-do-in-an-application-form)
 
 ---
 
@@ -417,6 +418,76 @@ Redis serves as the Rails cache backend for:
 | Rails Cache | `production.rb` | General-purpose caching |
 
 Redis is essential infrastructure that powers real-time features (WebSockets), prevents race conditions (locks), optimizes performance (caching), and manages background jobs (Sidekiq).
+
+---
+
+## What does the tenant_code do in an application form?
+
+`tenant_code` is **not actually a field on the ApplicationForm model**. It's a test-only convenience feature that makes tests more readable.
+
+### What `tenant_code` Actually Is
+
+`tenant_code` is a **symbolic name used in test helpers** that gets converted to a `tenant_id`:
+
+**Test Helper Usage** - `test/test_helpers/build_app_form_helper.rb:14-15`
+```ruby
+@tenant_id = if tenant_code
+  ReferencedCarriers.find_id(tenant_code.to_sym)
+```
+
+**What it does:**
+- Takes a symbolic name like `:bold_penguin`, `:progressive`, `:afi`, `:hiscox`
+- Looks it up in `ReferencedCarriers` constant (`test/test_helpers/referenced_carriers.rb`)
+- Returns the actual UUID `tenant_id` for that carrier/terminal/agent
+
+### What ApplicationForm Actually Uses: `tenant_id`
+
+The ApplicationForm model uses `tenant_id`, not `tenant_code`:
+
+**ApplicationForm** - `app/models/application_form.rb:4`
+```ruby
+class ApplicationForm < ApplicationRecord
+  has_tenant  # Sets up tenant_id relationship
+```
+
+### Purpose of `tenant_id` in ApplicationForm
+
+The `tenant_id` field identifies **which carrier, terminal, or independent agent owns the application form**:
+
+1. **Carrier** - Insurance carriers like Hiscox, Progressive, Coterie (`tenant_type: 'carrier'`)
+2. **Terminal** - Brokerages/distribution partners like Bold Penguin, AFI (`tenant_type: 'terminal'`)
+3. **Independent Agent** - Individual agent shops (`tenant_type: 'independent_agent'`)
+4. **Template** - Template tenants that others inherit from (`tenant_type: 'template'`)
+
+### Example Mappings
+
+From `test/test_helpers/referenced_carriers.rb:219-358`:
+
+| tenant_code | tenant_id (UUID) | tenant_type | Description |
+|-------------|------------------|-------------|-------------|
+| `:bold_penguin` | `76fe7443-2629-494c-b645-9c4d14d780e2` | terminal | Bold Penguin terminal |
+| `:progressive` | `da35b4bd-2bb4-4e2b-b999-a6653edeb883` | terminal | Progressive terminal |
+| `:hiscox` | `5c8b3d43-f637-47c4-a466-b91ae33abe21` | carrier | Hiscox carrier |
+| `:afi` | `06b9f7fe-6b9d-4c7c-b8ef-a24f80f9f97c` | terminal | AFI terminal |
+
+### How It's Used in Tests
+
+```ruby
+# Test code
+create_app(tenant_code: :bold_penguin) do |context|
+  # Creates an app form with tenant_id = '76fe7443-2629-494c-b645-9c4d14d780e2'
+end
+
+start_app(tenant_code: :progressive) do |changeset|
+  # Creates an app form with tenant_id = 'da35b4bd-2bb4-4e2b-b999-a6653edeb883'
+end
+```
+
+### Summary
+
+- **`tenant_code`** = Test-only symbolic shorthand (`:bold_penguin`, `:hiscox`, etc.)
+- **`tenant_id`** = Actual UUID stored in ApplicationForm
+- **Purpose** = Determines ownership, available carriers, product offerings, branding, and business logic for that application
 
 ---
 
